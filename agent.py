@@ -7,10 +7,8 @@ from tools.knowledge_tool import ask_question
 from tools.sql_tool import run_sql
 
 
-# Load environment variables
 load_dotenv()
 
-# OpenAI client
 client = OpenAI()
 
 
@@ -24,28 +22,30 @@ TOOLS = [
         "name": "knowledge_tool",
         "description": (
             "Search company documents and answer questions using "
-            "the enterprise knowledge base. Use this for policies, "
-            "definitions, SOPs, manuals, procedures, and documentation."
+            "the enterprise knowledge base. Use this for company "
+            "policies, definitions, SOPs, manuals, procedures, "
+            "and documentation."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "The user's question about company documentation."
+                    "description": "The user's question."
                 }
             },
             "required": ["question"],
-            "additionalProperties": False,
-        },
+            "additionalProperties": False
+        }
     },
+
     {
         "type": "function",
         "name": "sql_tool",
         "description": (
             "Query the Logistics Analytics SQL Server database. "
             "Use this for shipment metrics, carrier performance, "
-            "operational analytics, reports, and numerical business data."
+            "counts, reports, analytics, and numerical business data."
         ),
         "parameters": {
             "type": "object",
@@ -56,144 +56,142 @@ TOOLS = [
                 }
             },
             "required": ["question"],
-            "additionalProperties": False,
-        },
-    },
+            "additionalProperties": False
+        }
+    }
 ]
 
 
 # --------------------------------------------------
-# Tool Execution
+# Execute Tools
 # --------------------------------------------------
 
 def execute_tool(tool_name, arguments):
 
     if tool_name == "knowledge_tool":
 
-        question = arguments["question"]
-
-        return ask_question(question)
-
+        return ask_question(
+            arguments["question"]
+        )
 
     if tool_name == "sql_tool":
 
-        question = arguments["question"]
-
-        return run_sql(question)
-
+        return run_sql(
+            arguments["question"]
+        )
 
     return f"Unknown tool: {tool_name}"
 
 
 # --------------------------------------------------
-# AI Agent
+# Agent
 # --------------------------------------------------
 
 def agent(question):
 
-    response = client.responses.create(
-        model="gpt-4.1",
-        instructions="""
-You are an enterprise AI operations assistant.
+    conversation = [
+        {
+            "role": "user",
+            "content": question
+        }
+    ]
 
-You have access to two tools:
+    while True:
 
-1. knowledge_tool
-Use it for:
-- Company policies
-- SOPs
-- Manuals
-- Definitions
-- Documentation
-- Procedures
-
-2. sql_tool
-Use it for:
-- Shipment metrics
-- Carrier performance
-- Operational analytics
-- Reports
-- Numerical business questions
-- Live SQL Server data
-
-Choose the appropriate tool based on the user's question.
-
-If the question requires information from company documents,
-use knowledge_tool.
-
-If the question requires operational data or calculations
-from the SQL database, use sql_tool.
-
-After receiving the tool result, provide a clear answer
-to the user.
-
-Do not invent business data.
-""",
-        tools=TOOLS,
-        input=question,
-    )
-
-
-    # --------------------------------------------------
-    # Process Tool Calls
-    # --------------------------------------------------
-
-    tool_outputs = []
-
-    for item in response.output:
-
-        if item.type == "function_call":
-
-            tool_name = item.name
-
-            arguments = json.loads(item.arguments)
-
-            tool_result = execute_tool(
-                tool_name,
-                arguments
-            )
-
-            tool_outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": item.call_id,
-                    "output": str(tool_result),
-                }
-            )
-
-
-    # --------------------------------------------------
-    # Return Final Answer
-    # --------------------------------------------------
-
-    if tool_outputs:
-
-        final_response = client.responses.create(
+        response = client.responses.create(
             model="gpt-4.1",
+
             instructions="""
 You are an enterprise AI operations assistant.
 
-Use the tool results provided to answer the user's question.
+Your job is to completely answer the user's question.
 
-Do not invent information.
+You have two tools.
 
-Give the user a concise, business-friendly answer.
+KNOWLEDGE TOOL:
+Use this for company-specific information:
+- Policies
+- SOPs
+- Manuals
+- Procedures
+- Definitions
+- Documentation
+
+SQL TOOL:
+Use this for operational information:
+- Shipment metrics
+- Carrier performance
+- Counts
+- Reports
+- Analytics
+- Numerical business questions
+
+IMPORTANT RULES:
+
+1. Read the ENTIRE user question before deciding what to do.
+
+2. If the question contains multiple requests, answer EVERY part.
+
+3. You may call multiple tools during the same conversation.
+
+4. If one tool answers only part of the question,
+   continue and call another tool when necessary.
+
+5. Do not stop after answering only one part of a multi-part question.
+
+6. You may answer directly when general knowledge is sufficient
+   and company-specific information is not required.
+
+7. Never invent company policies or operational data.
+
+8. After all required tools have been used, provide one
+   clear, complete answer addressing every part of the
+   original question.
 """,
+
             tools=TOOLS,
-            input=[
-                {
-                    "role": "user",
-                    "content": question,
-                },
-                *response.output,
-                *tool_outputs,
-            ],
+
+            input=conversation
         )
 
-        return final_response.output_text
+        # Find tool calls
+        tool_calls = [
+            item
+            for item in response.output
+            if item.type == "function_call"
+        ]
 
+        # No tool calls means GPT believes it can answer
+        if not tool_calls:
 
-    return response.output_text
+            return response.output_text
+
+        # Preserve GPT's response
+        conversation.extend(response.output)
+
+        # Execute ALL requested tools
+        for tool_call in tool_calls:
+
+            arguments = json.loads(
+                tool_call.arguments
+            )
+
+            print(
+                f"Calling tool: {tool_call.name}"
+            )
+
+            result = execute_tool(
+                tool_call.name,
+                arguments
+            )
+
+            conversation.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": tool_call.call_id,
+                    "output": str(result)
+                }
+            )
 
 
 # --------------------------------------------------
@@ -202,8 +200,12 @@ Give the user a concise, business-friendly answer.
 
 if __name__ == "__main__":
 
-    question = "Show shipment count by carrier"
-
+    question = (
+        "What is Python?"
+    )
     answer = agent(question)
-
+    
+    print("\n-----------------------------")
+    print("FINAL ANSWER")
+    print("-----------------------------")
     print(answer)
